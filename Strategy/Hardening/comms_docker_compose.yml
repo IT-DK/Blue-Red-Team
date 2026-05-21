@@ -1,0 +1,79 @@
+# NAJPIERW .env POSTGRES_PASSWORD=jakiesdlugiehaslo
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: chat_postgres
+    restart: unless-stopped
+    environment:
+      #POSTGRES_HOST_AUTH_METHOD: trust  # No authentication required
+      POSTGRES_DB: chatdb
+      POSTGRES_USER: chatuser
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432"  # Exposed to outside world
+    volumes:
+      - ./db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - chat_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    container_name: chat_web
+    restart: unless-stopped
+    ports:
+      - "443:8000"
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://chatuser:${POSTGRES_PASSWORD}@postgres:5432/chatdb
+      PYTHONUNBUFFERED: 1
+    networks:
+      - chat_network
+    volumes:
+      - .:/app
+      - ./backups:/app/backups
+      - ./certs:/app/certs:ro
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --ssl-keyfile /app/certs/privkey.pem --ssl-certfile /app/certs/fullchain.pem --reload
+    develop:
+      watch:
+        - action: sync
+          path: ./
+          target: /app
+          ignore:
+            - db_data/
+            - __pycache__/
+        - action: rebuild
+          path: requirements.txt
+
+  capture_web:
+    image: nicolaka/netshoot:latest
+    container_name: capture_chat_web
+    networks:
+      - chat_network
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - /var/log/pcaps:/pcaps
+    depends_on:
+      - web
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        mkdir -p /pcaps &&
+        exec tcpdump -i any -s 0 -n -U
+        -G 180 -W 4
+        -w /pcaps/chat_web_%Y%m%d_%H%M%S.pcap
+networks:
+  chat_network:
+    driver: bridge
+
+volumes:
+  db_data:

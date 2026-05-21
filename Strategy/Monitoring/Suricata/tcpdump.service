@@ -1,0 +1,12 @@
+[Unit]
+Description=TCPDump Packet Capture Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/tcpdump -i eth0 -w /var/log/pcaps/capture-%%Y-%%m-%%d_%%H-%%M-%%S.pcap -G 3600 -C 100 -Z root
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

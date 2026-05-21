@@ -1,0 +1,484 @@
+# =============================================================================
+# OCF26 CyberLegion - Suricata Rules
+# =============================================================================
+# Tailored for Attack-Defence CTF on Debian 12 with Docker-based services.
+# Tech stacks: Python, PHP, C/C++, Golang, Rust, JS, Java, Bash
+# Databases:   MariaDB, PostgreSQL, Redis
+# Servers:     Nginx, Apache, DNS
+#
+# IMPORTANT: These rules are DETECTION-ONLY (alert, not drop).
+#            Blocking traffic risks SLA penalties.
+#
+# Deploy: Copy to /etc/suricata/rules/ocf26_rules.rules
+#         Add to suricata.yaml: - /etc/suricata/rules/ocf26_rules.rules
+#         Restart: systemctl restart suricata
+#
+# SID Ranges:
+#   100xxx - Flag exfiltration
+#   101xxx - SQL Injection
+#   102xxx - Command Injection / RCE
+#   103xxx - Path Traversal / LFI / RFI
+#   104xxx - SSTI (Server-Side Template Injection)
+#   105xxx - Reverse Shells & Backdoors
+#   106xxx - Webshells
+#   107xxx - Data Destruction (logical DoS)
+#   108xxx - Deserialization Attacks
+#   109xxx - Authentication Attacks
+#   110xxx - Database Exploitation (Redis, PostgreSQL, MySQL)
+#   111xxx - PHP-specific Attacks
+#   112xxx - File Upload Attacks
+#   113xxx - SSRF
+#   114xxx - XXE
+#   115xxx - DNS Attacks
+#   116xxx - Reconnaissance
+# =============================================================================
+
+
+# =============================================================================
+# FLAG EXFILTRATION DETECTION (HIGHEST PRIORITY)
+# =============================================================================
+# Flag format: [task]_[round]_[team]_[hex_signature]
+# Example: 1_20_2_81e01028111406ab
+# Flags may appear in HTTP responses (being stolen from us)
+
+# Flag pattern in HTTP response body (someone is stealing our flag)
+alert http any any -> any any (msg:"FLAG EXFIL - AD flag pattern in HTTP response"; content:"_"; http_server_body; pcre:"/\d{1,2}_\d{1,3}_\d{1,2}_[a-f0-9]{16}/Ri"; metadata: tag flag_exfil; sid:100001; rev:2;)
+
+# Flag pattern in HTTP request (attacker sending flag somewhere, or in URI)
+alert http any any -> any any (msg:"FLAG EXFIL - AD flag pattern in HTTP request"; content:"_"; http_client_body; pcre:"/\d{1,2}_\d{1,3}_\d{1,2}_[a-f0-9]{16}/Ri"; metadata: tag flag_exfil; sid:100002; rev:2;)
+
+# Flag pattern in HTTP URI
+alert http any any -> any any (msg:"FLAG EXFIL - AD flag in URI"; content:"_"; http_uri; pcre:"/\d{1,2}_\d{1,3}_\d{1,2}_[a-f0-9]{16}/Ri"; metadata: tag flag_exfil; sid:100003; rev:2;)
+
+# Base64 detection: common B64 patterns for flag-like strings
+# (We can't match all B64 but we can match suspicious long b64 in responses)
+alert http any any -> any any (msg:"FLAG EXFIL - Possible base64 encoded data in response"; content:"=="; http_server_body; pcre:"/[A-Za-z0-9+\/]{20,}={0,2}/R"; metadata: tag flag_exfil_b64; sid:100004; rev:1;)
+
+# Flag in raw TCP stream (non-HTTP exfiltration)
+alert tcp any any -> any any (msg:"FLAG EXFIL - AD flag pattern in TCP stream"; pcre:"/\d{1,2}_\d{1,3}_\d{1,2}_[a-f0-9]{16}/"; metadata: tag flag_exfil_tcp; sid:100005; rev:1;)
+
+
+# =============================================================================
+# SQL INJECTION
+# =============================================================================
+
+# --- Generic / Boolean-based ---
+alert http any any -> any any (msg:"SQLi - OR 1=1 variant"; content:"or"; nocase; pcre:"/[\s'\"]+or[\s'\"]+['\"]?\d+['\"]?\s*=\s*['\"]?\d+/i"; metadata: tag sqli; sid:101001; rev:2;)
+
+alert http any any -> any any (msg:"SQLi - AND 1=1 boolean test"; pcre:"/[\s'\"]+and[\s'\"]+['\"]?\d+['\"]?\s*=\s*['\"]?\d+/i"; metadata: tag sqli; sid:101002; rev:1;)
+
+# --- UNION-based ---
+alert http any any -> any any (msg:"SQLi - UNION SELECT"; content:"union"; nocase; content:"select"; nocase; distance:0; within:20; metadata: tag sqli; sid:101003; rev:2;)
+
+alert http any any -> any any (msg:"SQLi - UNION ALL SELECT"; content:"union"; nocase; content:"all"; nocase; distance:0; within:10; content:"select"; nocase; distance:0; within:15; metadata: tag sqli; sid:101004; rev:1;)
+
+# --- Time-based blind ---
+alert http any any -> any any (msg:"SQLi - SLEEP() time-based blind (MySQL/MariaDB)"; content:"sleep"; nocase; content:"("; distance:0; within:5; metadata: tag sqli_blind; sid:101005; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - BENCHMARK() time-based blind (MySQL)"; content:"benchmark"; nocase; content:"("; distance:0; within:5; metadata: tag sqli_blind; sid:101006; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - pg_sleep() time-based blind (PostgreSQL)"; content:"pg_sleep"; nocase; metadata: tag sqli_blind; sid:101007; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - WAITFOR DELAY"; content:"waitfor"; nocase; content:"delay"; nocase; distance:0; within:15; metadata: tag sqli_blind; sid:101008; rev:1;)
+
+# --- Error-based ---
+alert http any any -> any any (msg:"SQLi - extractvalue() error-based"; content:"extractvalue"; nocase; metadata: tag sqli; sid:101009; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - updatexml() error-based"; content:"updatexml"; nocase; metadata: tag sqli; sid:101010; rev:1;)
+
+# --- Stacked queries ---
+alert http any any -> any any (msg:"SQLi - Semicolon stacked query attempt"; http_uri; pcre:"/[';]\s*(select|insert|update|delete|drop|alter|create|exec|union)/i"; metadata: tag sqli_stacked; sid:101011; rev:1;)
+
+# --- Comment-based evasion ---
+alert http any any -> any any (msg:"SQLi - Comment evasion /**/ in URI"; content:"/*"; http_uri; content:"*/"; http_uri; distance:0; metadata: tag sqli_evasion; sid:101012; rev:1;)
+
+# --- PostgreSQL specific ---
+alert http any any -> any any (msg:"SQLi - PostgreSQL COPY TO/FROM"; content:"copy"; nocase; pcre:"/copy\s+.+\s+(to|from)\s+/i"; metadata: tag sqli_pg; sid:101013; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - PostgreSQL dollar-quoting"; content:"$$"; metadata: tag sqli_pg; sid:101014; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - PostgreSQL string_agg/array_agg"; pcre:"/(string_agg|array_agg)\s*\(/i"; metadata: tag sqli_pg; sid:101015; rev:1;)
+
+# --- MySQL/MariaDB specific ---
+alert http any any -> any any (msg:"SQLi - MySQL INTO OUTFILE"; content:"into"; nocase; content:"outfile"; nocase; distance:0; within:20; metadata: tag sqli_mysql; sid:101016; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - MySQL LOAD_FILE()"; content:"load_file"; nocase; metadata: tag sqli_mysql; sid:101017; rev:1;)
+
+alert http any any -> any any (msg:"SQLi - MySQL information_schema"; content:"information_schema"; nocase; metadata: tag sqli_mysql; sid:101018; rev:1;)
+
+
+# =============================================================================
+# COMMAND INJECTION / RCE
+# =============================================================================
+
+# --- Shell metacharacters in URI ---
+alert http any any -> any any (msg:"CMDi - Semicolon in URI"; content:"%3b"; nocase; http_uri; metadata: tag cmdi; sid:102001; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - Pipe in URI (encoded)"; content:"%7c"; nocase; http_uri; metadata: tag cmdi; sid:102002; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - Backtick execution in URI"; content:"%60"; http_uri; metadata: tag cmdi; sid:102003; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - $() subshell in request"; content:"$("; metadata: tag cmdi; sid:102004; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - Backtick command substitution"; content:"`"; pcre:"/`.+`/"; metadata: tag cmdi; sid:102005; rev:1;)
+
+# --- Known dangerous commands ---
+alert http any any -> any any (msg:"CMDi - /bin/sh invocation"; content:"/bin/sh"; nocase; metadata: tag cmdi; sid:102006; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - /bin/bash invocation"; content:"/bin/bash"; nocase; metadata: tag cmdi; sid:102007; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - wget remote download"; content:"wget"; nocase; pcre:"/wget\s+https?:\/\//i"; metadata: tag cmdi; sid:102008; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - curl remote download"; content:"curl"; nocase; pcre:"/curl\s+(-[a-zA-Z]+\s+)*https?:\/\//i"; metadata: tag cmdi; sid:102009; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - cat /etc/passwd"; content:"cat"; nocase; content:"/etc/passwd"; distance:0; within:30; metadata: tag cmdi; sid:102010; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - id command execution"; pcre:"/[\s;&|`]id[\s;&|`$]/"; metadata: tag cmdi; sid:102011; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - whoami command"; content:"whoami"; nocase; metadata: tag cmdi; sid:102012; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - uname command"; pcre:"/[\s;&|`]uname[\s;&|`$-]/"; metadata: tag cmdi; sid:102013; rev:1;)
+
+# --- Newline injection (HTTP header/command splitting) ---
+alert http any any -> any any (msg:"CMDi - Newline injection %0a"; content:"%0a"; nocase; http_uri; metadata: tag cmdi; sid:102014; rev:1;)
+
+alert http any any -> any any (msg:"CMDi - Carriage return injection %0d"; content:"%0d"; nocase; http_uri; metadata: tag cmdi; sid:102015; rev:1;)
+
+
+# =============================================================================
+# PATH TRAVERSAL / LFI / RFI
+# =============================================================================
+
+alert http any any -> any any (msg:"LFI - Path traversal ../"; content:"../"; http_uri; metadata: tag path_traversal; sid:103001; rev:1;)
+
+alert http any any -> any any (msg:"LFI - Path traversal ..\\"; content:"..\\"; http_uri; metadata: tag path_traversal; sid:103002; rev:1;)
+
+# URL-encoded variants
+alert http any any -> any any (msg:"LFI - Encoded traversal %2e%2e%2f"; content:"%2e%2e%2f"; nocase; http_uri; metadata: tag path_traversal; sid:103003; rev:1;)
+
+alert http any any -> any any (msg:"LFI - Double-encoded traversal %252e"; content:"%252e"; nocase; http_uri; metadata: tag path_traversal; sid:103004; rev:1;)
+
+# Target files
+alert http any any -> any any (msg:"LFI - /etc/passwd access"; content:"/etc/passwd"; http_uri; metadata: tag lfi; sid:103005; rev:1;)
+
+alert http any any -> any any (msg:"LFI - /etc/shadow access"; content:"/etc/shadow"; http_uri; metadata: tag lfi; sid:103006; rev:1;)
+
+alert http any any -> any any (msg:"LFI - /proc/self/environ access"; content:"/proc/self"; http_uri; metadata: tag lfi; sid:103007; rev:1;)
+
+alert http any any -> any any (msg:"LFI - .env file access"; content:".env"; http_uri; metadata: tag lfi; sid:103008; rev:1;)
+
+alert http any any -> any any (msg:"LFI - docker-compose.yml access"; content:"docker-compose"; http_uri; metadata: tag lfi; sid:103009; rev:1;)
+
+# PHP wrappers
+alert http any any -> any any (msg:"LFI - php://filter wrapper"; content:"php://filter"; nocase; http_uri; metadata: tag lfi_php; sid:103010; rev:1;)
+
+alert http any any -> any any (msg:"LFI - php://input wrapper"; content:"php://input"; nocase; http_uri; metadata: tag lfi_php; sid:103011; rev:1;)
+
+alert http any any -> any any (msg:"RFI - data:// wrapper"; content:"data://"; nocase; http_uri; metadata: tag rfi; sid:103012; rev:1;)
+
+alert http any any -> any any (msg:"RFI - expect:// wrapper"; content:"expect://"; nocase; http_uri; metadata: tag rfi; sid:103013; rev:1;)
+
+# Null byte (old PHP versions)
+alert http any any -> any any (msg:"LFI - Null byte %00 in URI"; content:"%00"; http_uri; metadata: tag lfi; sid:103014; rev:1;)
+
+
+# =============================================================================
+# SSTI (Server-Side Template Injection)
+# =============================================================================
+
+# Jinja2 / Python
+alert http any any -> any any (msg:"SSTI - Jinja2 {{ expression }}"; content:"{{"; metadata: tag ssti; sid:104001; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 __class__ probe"; content:"__class__"; nocase; metadata: tag ssti; sid:104002; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 __mro__ probe"; content:"__mro__"; nocase; metadata: tag ssti; sid:104003; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 __subclasses__"; content:"__subclasses__"; nocase; metadata: tag ssti; sid:104004; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 __globals__"; content:"__globals__"; nocase; metadata: tag ssti; sid:104005; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 __builtins__"; content:"__builtins__"; nocase; metadata: tag ssti; sid:104006; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Jinja2 config.items()"; content:"config"; content:"items"; distance:0; within:20; metadata: tag ssti; sid:104007; rev:1;)
+
+# Twig / PHP template
+alert http any any -> any any (msg:"SSTI - Twig {{_self.env}}"; content:"_self.env"; metadata: tag ssti; sid:104008; rev:1;)
+
+# Generic math probe (7*7=49, 7*191, etc.)
+alert http any any -> any any (msg:"SSTI - Math probe {{7*7}}"; content:"{{7*7}}"; metadata: tag ssti; sid:104009; rev:1;)
+
+alert http any any -> any any (msg:"SSTI - Math probe ${7*7}"; content:"${7*7}"; metadata: tag ssti; sid:104010; rev:1;)
+
+# Java/Freemarker
+alert http any any -> any any (msg:"SSTI - Freemarker <#assign>"; content:"<#assign"; nocase; metadata: tag ssti; sid:104011; rev:1;)
+
+# Expression Language (Java)
+alert http any any -> any any (msg:"SSTI - Java EL ${Runtime}"; content:"Runtime"; content:"getRuntime"; distance:0; within:30; metadata: tag ssti; sid:104012; rev:1;)
+
+
+# =============================================================================
+# REVERSE SHELLS & BACKDOORS
+# =============================================================================
+
+# Common reverse shell ports
+alert tcp any any -> any 4444 (msg:"REVSHELL - Connection to port 4444"; metadata: tag revshell; sid:105001; rev:1;)
+alert tcp any any -> any 9999 (msg:"REVSHELL - Connection to port 9999"; metadata: tag revshell; sid:105002; rev:1;)
+alert tcp any any -> any 1337 (msg:"REVSHELL - Connection to port 1337"; metadata: tag revshell; sid:105003; rev:1;)
+alert tcp any any -> any 4242 (msg:"REVSHELL - Connection to port 4242"; metadata: tag revshell; sid:105004; rev:1;)
+alert tcp any any -> any 5555 (msg:"REVSHELL - Connection to port 5555"; metadata: tag revshell; sid:105005; rev:1;)
+alert tcp any any -> any 8888 (msg:"REVSHELL - Connection to port 8888"; metadata: tag revshell; sid:105006; rev:1;)
+alert tcp any any -> any 31337 (msg:"REVSHELL - Connection to port 31337"; metadata: tag revshell; sid:105007; rev:1;)
+
+# Reverse shell payloads in HTTP
+alert http any any -> any any (msg:"REVSHELL - bash -i redirect"; content:"bash"; content:"-i"; distance:0; within:10; content:"/dev/tcp"; distance:0; within:30; metadata: tag revshell; sid:105010; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - nc -e /bin/sh"; content:"nc"; content:"-e"; distance:0; within:10; content:"/bin/"; distance:0; within:20; metadata: tag revshell; sid:105011; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - ncat reverse shell"; content:"ncat"; metadata: tag revshell; sid:105012; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - python -c import socket"; content:"python"; content:"import"; distance:0; within:20; content:"socket"; distance:0; within:20; metadata: tag revshell; sid:105013; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - perl -e socket"; content:"perl"; content:"socket"; distance:0; within:30; metadata: tag revshell; sid:105014; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - ruby -rsocket"; content:"ruby"; content:"socket"; distance:0; within:20; metadata: tag revshell; sid:105015; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - mkfifo pipe pattern"; content:"mkfifo"; metadata: tag revshell; sid:105016; rev:1;)
+
+alert http any any -> any any (msg:"REVSHELL - /dev/tcp/ pattern"; content:"/dev/tcp/"; metadata: tag revshell; sid:105017; rev:1;)
+
+# Outbound shell activity on TCP (non-HTTP)
+alert tcp any any -> any any (msg:"REVSHELL - Interactive shell banner (uid=)"; content:"uid="; content:"gid="; distance:0; within:30; metadata: tag revshell; sid:105020; rev:1;)
+
+
+# =============================================================================
+# WEBSHELL DETECTION
+# =============================================================================
+
+alert http any any -> any any (msg:"WEBSHELL - PHP system() in request"; content:"system("; nocase; metadata: tag webshell; sid:106001; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP exec() in request"; content:"exec("; nocase; metadata: tag webshell; sid:106002; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP passthru() in request"; content:"passthru("; nocase; metadata: tag webshell; sid:106003; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP shell_exec() in request"; content:"shell_exec("; nocase; metadata: tag webshell; sid:106004; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP eval() in request"; content:"eval("; nocase; metadata: tag webshell; sid:106005; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP assert() in request"; content:"assert("; nocase; metadata: tag webshell; sid:106006; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - PHP proc_open() in request"; content:"proc_open("; nocase; metadata: tag webshell; sid:106007; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - cmd parameter pattern"; http_uri; pcre:"/[?&](cmd|command|exec|execute|run|shell|c|x)=/i"; metadata: tag webshell; sid:106008; rev:1;)
+
+# Weevely (mentioned in wiki tools)
+alert http any any -> any any (msg:"WEBSHELL - Weevely-like obfuscated PHP"; content:"base64_decode"; nocase; content:"eval"; nocase; distance:0; within:50; metadata: tag webshell; sid:106009; rev:1;)
+
+# Python os.system / subprocess
+alert http any any -> any any (msg:"WEBSHELL - Python os.system() in request"; content:"os.system"; metadata: tag webshell; sid:106010; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - Python subprocess in request"; content:"subprocess"; metadata: tag webshell; sid:106011; rev:1;)
+
+alert http any any -> any any (msg:"WEBSHELL - Python os.popen() in request"; content:"os.popen"; metadata: tag webshell; sid:106012; rev:1;)
+
+
+# =============================================================================
+# DATA DESTRUCTION (Logical DoS - allowed but we want to detect it)
+# =============================================================================
+
+alert http any any -> any any (msg:"DESTRUCT - SQL DROP TABLE"; content:"drop"; nocase; content:"table"; nocase; distance:0; within:15; metadata: tag destruction; sid:107001; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - SQL DROP DATABASE"; content:"drop"; nocase; content:"database"; nocase; distance:0; within:15; metadata: tag destruction; sid:107002; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - SQL TRUNCATE TABLE"; content:"truncate"; nocase; content:"table"; nocase; distance:0; within:15; metadata: tag destruction; sid:107003; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - SQL DELETE FROM (mass delete)"; content:"delete"; nocase; content:"from"; nocase; distance:0; within:15; metadata: tag destruction; sid:107004; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - rm -rf command"; content:"rm"; content:"-rf"; distance:0; within:10; metadata: tag destruction; sid:107005; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - rm -f command"; content:"rm"; content:"-f"; distance:0; within:10; metadata: tag destruction; sid:107006; rev:1;)
+
+alert http any any -> any any (msg:"DESTRUCT - Docker stop/rm attempt"; pcre:"/docker\s+(stop|rm|kill)/i"; metadata: tag destruction; sid:107007; rev:1;)
+
+
+# =============================================================================
+# DESERIALIZATION ATTACKS
+# =============================================================================
+
+# PHP
+alert http any any -> any any (msg:"DESER - PHP unserialize() in request"; content:"unserialize"; nocase; metadata: tag deserialization; sid:108001; rev:1;)
+
+alert http any any -> any any (msg:"DESER - PHP serialized object pattern O:"; pcre:"/O:\d+:\"/"; metadata: tag deserialization; sid:108002; rev:1;)
+
+# Python pickle
+alert http any any -> any any (msg:"DESER - Python pickle magic bytes"; content:"|80 03|"; metadata: tag deserialization; sid:108003; rev:1;)
+
+alert http any any -> any any (msg:"DESER - Python pickle __reduce__"; content:"__reduce__"; metadata: tag deserialization; sid:108004; rev:1;)
+
+# Java serialization
+alert http any any -> any any (msg:"DESER - Java serialized object (aced0005)"; content:"|ac ed 00 05|"; metadata: tag deserialization; sid:108005; rev:1;)
+
+# YAML unsafe load
+alert http any any -> any any (msg:"DESER - YAML !!python/object"; content:"!!python/object"; metadata: tag deserialization; sid:108006; rev:1;)
+
+# Node.js
+alert http any any -> any any (msg:"DESER - Node.js prototype pollution __proto__"; content:"__proto__"; metadata: tag deserialization; sid:108007; rev:1;)
+
+alert http any any -> any any (msg:"DESER - Node.js constructor pollution"; content:"constructor"; content:"prototype"; distance:0; within:30; metadata: tag deserialization; sid:108008; rev:1;)
+
+
+# =============================================================================
+# AUTHENTICATION / BRUTE FORCE INDICATORS
+# =============================================================================
+
+# These won't catch every brute force but flag suspicious patterns
+alert http any any -> any any (msg:"AUTH - Login endpoint hit with POST"; content:"POST"; http_method; pcre:"/\/(login|signin|auth|authenticate|api\/login|api\/auth)/i"; http_uri; metadata: tag auth_attempt; sid:109001; rev:1;)
+
+alert http any any -> any any (msg:"AUTH - Registration endpoint hit with POST"; content:"POST"; http_method; pcre:"/\/(register|signup|api\/register|api\/signup|create.?account)/i"; http_uri; metadata: tag registration; sid:109002; rev:1;)
+
+# HTTP 401 (repeated = brute force)
+alert http any any -> any any (msg:"AUTH - HTTP 401 Unauthorized response"; http.stat_code; content:"401"; metadata: tag auth_fail; sid:109003; rev:1;)
+
+
+# =============================================================================
+# DATABASE EXPLOITATION (Redis, PostgreSQL, MySQL)
+# =============================================================================
+
+# Redis commands in HTTP (Redis injection via SSRF or direct)
+alert http any any -> any any (msg:"DB - Redis CONFIG SET"; content:"CONFIG"; nocase; content:"SET"; nocase; distance:0; within:10; metadata: tag redis; sid:110001; rev:1;)
+
+alert http any any -> any any (msg:"DB - Redis EVAL (Lua exec)"; content:"EVAL"; pcre:"/EVAL\s+\"/i"; metadata: tag redis; sid:110002; rev:1;)
+
+alert http any any -> any any (msg:"DB - Redis SLAVEOF/REPLICAOF"; pcre:"/(SLAVEOF|REPLICAOF)\s+\d/i"; metadata: tag redis; sid:110003; rev:1;)
+
+alert http any any -> any any (msg:"DB - Redis FLUSHALL/FLUSHDB"; pcre:"/FLUSH(ALL|DB)/i"; metadata: tag redis; sid:110004; rev:1;)
+
+# Redis on default port from external
+alert tcp any any -> any 6379 (msg:"DB - Direct Redis connection attempt"; metadata: tag redis_direct; sid:110005; rev:1;)
+
+# PostgreSQL on default port from external
+alert tcp any any -> any 5432 (msg:"DB - Direct PostgreSQL connection attempt"; metadata: tag pg_direct; sid:110006; rev:1;)
+
+# MySQL/MariaDB on default port from external
+alert tcp any any -> any 3306 (msg:"DB - Direct MySQL/MariaDB connection attempt"; metadata: tag mysql_direct; sid:110007; rev:1;)
+
+# PostgreSQL RCE patterns
+alert http any any -> any any (msg:"DB - PostgreSQL COPY TO PROGRAM"; content:"copy"; nocase; content:"program"; nocase; distance:0; within:30; metadata: tag pg_rce; sid:110008; rev:1;)
+
+alert http any any -> any any (msg:"DB - PostgreSQL lo_import/lo_export"; pcre:"/lo_(import|export)/i"; metadata: tag pg_rce; sid:110009; rev:1;)
+
+
+# =============================================================================
+# PHP-SPECIFIC ATTACKS
+# =============================================================================
+
+alert http any any -> any any (msg:"PHP - preg_replace /e modifier (RCE)"; content:"preg_replace"; content:"/e"; distance:0; within:30; metadata: tag php_rce; sid:111001; rev:1;)
+
+alert http any any -> any any (msg:"PHP - create_function() RCE"; content:"create_function"; nocase; metadata: tag php_rce; sid:111002; rev:1;)
+
+alert http any any -> any any (msg:"PHP - mail() injection"; content:"mail("; nocase; metadata: tag php_rce; sid:111003; rev:1;)
+
+alert http any any -> any any (msg:"PHP - disable_functions bypass"; content:"disable_functions"; nocase; metadata: tag php_rce; sid:111004; rev:1;)
+
+alert http any any -> any any (msg:"PHP - .phar extension access"; content:".phar"; http_uri; metadata: tag php_attack; sid:111005; rev:1;)
+
+alert http any any -> any any (msg:"PHP - phpinfo() in request"; content:"phpinfo"; nocase; metadata: tag php_recon; sid:111006; rev:1;)
+
+
+# =============================================================================
+# FILE UPLOAD ATTACKS
+# =============================================================================
+
+alert http any any -> any any (msg:"UPLOAD - PHP file upload (.php in filename)"; content:"Content-Disposition"; content:"filename="; distance:0; within:30; content:".php"; distance:0; within:80; metadata: tag upload_php; sid:112001; rev:1;)
+
+alert http any any -> any any (msg:"UPLOAD - PHP extension variant (.phtml)"; content:"filename="; content:".phtml"; distance:0; within:80; metadata: tag upload_php; sid:112002; rev:1;)
+
+alert http any any -> any any (msg:"UPLOAD - JSP file upload"; content:"filename="; content:".jsp"; distance:0; within:80; metadata: tag upload_jsp; sid:112003; rev:1;)
+
+alert http any any -> any any (msg:"UPLOAD - Shell script upload (.sh)"; content:"filename="; content:".sh"; distance:0; within:80; metadata: tag upload_shell; sid:112004; rev:1;)
+
+alert http any any -> any any (msg:"UPLOAD - ELF binary upload"; content:"filename="; content:"|7f 45 4c 46|"; distance:0; within:200; metadata: tag upload_elf; sid:112005; rev:1;)
+
+
+# =============================================================================
+# SSRF (Server-Side Request Forgery)
+# =============================================================================
+
+alert http any any -> any any (msg:"SSRF - Localhost/127.0.0.1 in parameter"; pcre:"/[?&][a-zA-Z_]+=https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0)/i"; http_uri; metadata: tag ssrf; sid:113001; rev:1;)
+
+alert http any any -> any any (msg:"SSRF - Internal IP 172.x in parameter"; pcre:"/[?&][a-zA-Z_]+=https?:\/\/172\.\d+\.\d+\.\d+/i"; http_uri; metadata: tag ssrf; sid:113002; rev:1;)
+
+alert http any any -> any any (msg:"SSRF - Internal IP 10.x in parameter"; pcre:"/[?&][a-zA-Z_]+=https?:\/\/10\.\d+\.\d+\.\d+/i"; http_uri; metadata: tag ssrf; sid:113003; rev:1;)
+
+alert http any any -> any any (msg:"SSRF - file:// protocol in parameter"; content:"file://"; nocase; metadata: tag ssrf; sid:113004; rev:1;)
+
+alert http any any -> any any (msg:"SSRF - gopher:// protocol in parameter"; content:"gopher://"; nocase; metadata: tag ssrf; sid:113005; rev:1;)
+
+alert http any any -> any any (msg:"SSRF - dict:// protocol in parameter"; content:"dict://"; nocase; metadata: tag ssrf; sid:113006; rev:1;)
+
+
+# =============================================================================
+# XXE (XML External Entity)
+# =============================================================================
+
+alert http any any -> any any (msg:"XXE - DOCTYPE ENTITY declaration"; content:"<!DOCTYPE"; nocase; content:"ENTITY"; nocase; distance:0; within:50; metadata: tag xxe; sid:114001; rev:1;)
+
+alert http any any -> any any (msg:"XXE - SYSTEM file:// entity"; content:"SYSTEM"; content:"file://"; distance:0; within:30; metadata: tag xxe; sid:114002; rev:1;)
+
+alert http any any -> any any (msg:"XXE - SYSTEM http:// entity"; content:"SYSTEM"; content:"http://"; distance:0; within:30; metadata: tag xxe; sid:114003; rev:1;)
+
+alert http any any -> any any (msg:"XXE - Parameter entity %"; content:"<!ENTITY"; content:"%"; distance:0; within:20; metadata: tag xxe; sid:114004; rev:1;)
+
+
+# =============================================================================
+# DNS ATTACKS (wiki mentions DNS services)
+# =============================================================================
+
+alert dns any any -> any any (msg:"DNS - Zone transfer AXFR request"; dns.query; content:"AXFR"; nocase; metadata: tag dns_attack; sid:115001; rev:1;)
+
+alert udp any any -> any 53 (msg:"DNS - Suspicious TXT query (possible tunneling)"; content:"|00 10|"; offset:12; metadata: tag dns_tunnel; sid:115002; rev:1;)
+
+
+# =============================================================================
+# RECONNAISSANCE
+# =============================================================================
+
+alert http any any -> any any (msg:"RECON - robots.txt access"; content:"/robots.txt"; http_uri; metadata: tag recon; sid:116001; rev:1;)
+
+alert http any any -> any any (msg:"RECON - .git directory access"; content:"/.git/"; http_uri; metadata: tag recon; sid:116002; rev:1;)
+
+alert http any any -> any any (msg:"RECON - .svn directory access"; content:"/.svn/"; http_uri; metadata: tag recon; sid:116003; rev:1;)
+
+alert http any any -> any any (msg:"RECON - .DS_Store access"; content:".DS_Store"; http_uri; metadata: tag recon; sid:116004; rev:1;)
+
+alert http any any -> any any (msg:"RECON - /admin endpoint"; content:"/admin"; http_uri; metadata: tag recon; sid:116005; rev:1;)
+
+alert http any any -> any any (msg:"RECON - /debug endpoint"; content:"/debug"; http_uri; metadata: tag recon; sid:116006; rev:1;)
+
+alert http any any -> any any (msg:"RECON - /actuator endpoint (Spring)"; content:"/actuator"; http_uri; metadata: tag recon; sid:116007; rev:1;)
+
+alert http any any -> any any (msg:"RECON - /server-status (Apache)"; content:"/server-status"; http_uri; metadata: tag recon; sid:116008; rev:1;)
+
+alert http any any -> any any (msg:"RECON - /server-info (Apache)"; content:"/server-info"; http_uri; metadata: tag recon; sid:116009; rev:1;)
+
+alert http any any -> any any (msg:"RECON - wp-admin WordPress access"; content:"/wp-admin"; http_uri; metadata: tag recon; sid:116010; rev:1;)
+
+alert http any any -> any any (msg:"RECON - Swagger/API docs access"; pcre:"/\/(swagger|api-docs|openapi)/i"; http_uri; metadata: tag recon; sid:116011; rev:1;)
+
+
+# =============================================================================
+# SUSPICIOUS HTTP PATTERNS
+# =============================================================================
+
+alert http any any -> any any (msg:"HTTP - Oversized User-Agent (possible tool)"; http.user_agent; pcre:"/.{300,}/"; metadata: tag suspicious; sid:117001; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - Empty User-Agent"; http.user_agent; content:""; depth:0; metadata: tag suspicious; sid:117002; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - Python-requests User-Agent"; http.user_agent; content:"python-requests"; nocase; metadata: tag tool_python; sid:117003; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - pwntools User-Agent"; http.user_agent; content:"pwntools"; nocase; metadata: tag tool_pwntools; sid:117004; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - curl User-Agent"; http.user_agent; content:"curl/"; nocase; metadata: tag tool_curl; sid:117005; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - Go-http-client User-Agent"; http.user_agent; content:"Go-http-client"; metadata: tag tool_golang; sid:117006; rev:1;)
+
+alert http any any -> any any (msg:"HTTP - 500 Internal Server Error"; http.stat_code; content:"500"; metadata: tag http_error; sid:117007; rev:1;)
