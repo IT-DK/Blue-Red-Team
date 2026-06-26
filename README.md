@@ -1,5 +1,10 @@
 Operations & Infrastructure Toolkit
 
+## Disclaimer
+
+Repozytorium ma charakter edukacyjny i portfolio.
+Nie zawiera świadomie żadnych poufnych danych ani elementów produkcyjnej infrastruktury.
+
 ## Opis
 
 Repozytorium zawiera skrypty, konfiguracje oraz notatki przygotowane podczas udziału w ćwiczeniach cyber.
@@ -72,10 +77,3 @@ Wszystkie dane wrażliwe, hasła i identyfikatory infrastruktury zostały usuni�
 ## Autor
 
 Drużyna uczestnicząca w ćwiczeniach OCF'26.
-
----
-
-## Disclaimer
-
-Repozytorium ma charakter edukacyjny i portfolio.
-Nie zawiera świadomie żadnych poufnych danych ani elementów produkcyjnej infrastruktury.
